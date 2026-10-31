@@ -734,18 +734,20 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Pillow & XcodeGen for iOS IPA Build
+      - name: Install Pillow for iOS App Icon Generation
         run: |
-          python3 -m pip install --quiet pillow
-          brew install xcodegen || true
+          python3 -m pip install --quiet --break-system-packages pillow || python3 -m pip install --quiet --user pillow
 
-      - name: Generate iOS Project, Custom Logo & Native Security Bridge
+      - name: Generate iOS Bundle, Custom Logo & Swift Source
         shell: python3 {0}
         run: |
           import os, glob, json, pathlib, textwrap
           from PIL import Image
 
-          os.makedirs("ios_app/NexaChat/Assets.xcassets/AppIcon.appiconset", exist_ok=True)
+          app_bundle = "ios_app/Payload/NexaChat.app"
+          iconset_dir = "ios_app/Assets.xcassets/AppIcon.appiconset"
+          os.makedirs(app_bundle, exist_ok=True)
+          os.makedirs(iconset_dir, exist_ok=True)
 
           # 1. Generate iOS App Icons from uploaded "Nexa Chat Neon Glass Logo.png"
           logo_files = []
@@ -778,9 +780,12 @@ jobs:
           ]
 
           for fname, px in icon_specs:
-              bg_rgb.resize((px, px), Image.Resampling.LANCZOS).save(
-                  f"ios_app/NexaChat/Assets.xcassets/AppIcon.appiconset/{fname}", "PNG"
-              )
+              resized = bg_rgb.resize((px, px), Image.Resampling.LANCZOS)
+              resized.save(f"{iconset_dir}/{fname}", "PNG")
+              resized.save(f"{app_bundle}/{fname}", "PNG")
+
+          bg_rgb.resize((120, 120), Image.Resampling.LANCZOS).save(f"{app_bundle}/AppIcon60x60@2x.png", "PNG")
+          bg_rgb.resize((180, 180), Image.Resampling.LANCZOS).save(f"{app_bundle}/AppIcon60x60@3x.png", "PNG")
 
           contents_json = {
               "images": [
@@ -796,12 +801,10 @@ jobs:
               ],
               "info": {"version": 1, "author": "xcode"}
           }
-          pathlib.Path("ios_app/NexaChat/Assets.xcassets/AppIcon.appiconset/Contents.json").write_text(
-              json.dumps(contents_json, indent=2)
-          )
+          pathlib.Path(f"{iconset_dir}/Contents.json").write_text(json.dumps(contents_json, indent=2))
 
-          # 2. Create Info.plist
-          pathlib.Path("ios_app/NexaChat/Info.plist").write_text(textwrap.dedent('''
+          # 2. Write Info.plist directly into Payload/NexaChat.app
+          pathlib.Path(f"{app_bundle}/Info.plist").write_text(textwrap.dedent(r'''
               <?xml version="1.0" encoding="UTF-8"?>
               <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
               <plist version="1.0">
@@ -811,9 +814,9 @@ jobs:
                   <key>CFBundleDisplayName</key>
                   <string>NEXA CHAT</string>
                   <key>CFBundleExecutable</key>
-                  <string>$(EXECUTABLE_NAME)</string>
+                  <string>NexaChat</string>
                   <key>CFBundleIdentifier</key>
-                  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+                  <string>com.imr.nexachat</string>
                   <key>CFBundleInfoDictionaryVersion</key>
                   <string>6.0</string>
                   <key>CFBundleName</key>
@@ -824,8 +827,28 @@ jobs:
                   <string>3.0</string>
                   <key>CFBundleVersion</key>
                   <string>3</string>
+                  <key>MinimumOSVersion</key>
+                  <string>15.0</string>
                   <key>LSRequiresIPhoneOS</key>
                   <true/>
+                  <key>UIDeviceFamily</key>
+                  <array>
+                      <integer>1</integer>
+                      <integer>2</integer>
+                  </array>
+                  <key>CFBundleIcons</key>
+                  <dict>
+                      <key>CFBundlePrimaryIcon</key>
+                      <dict>
+                          <key>CFBundleIconFiles</key>
+                          <array>
+                              <string>AppIcon60x60</string>
+                              <string>Icon-60</string>
+                          </array>
+                          <key>CFBundleIconName</key>
+                          <string>AppIcon</string>
+                      </dict>
+                  </dict>
                   <key>UILaunchScreen</key>
                   <dict/>
                   <key>UIRequiredDeviceCapabilities</key>
@@ -848,33 +871,8 @@ jobs:
               </plist>
           ''').strip() + "\n")
 
-          # 3. Create AppDelegate.swift & ViewController.swift (with Anti-AirPlay/ScreenCapture & Native Bridge)
-          pathlib.Path("ios_app/NexaChat/AppDelegate.swift").write_text(textwrap.dedent('''
-              import UIKit
-              import UserNotifications
-
-              @main
-              class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-                  var window: UIWindow?
-
-                  func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-                      UNUserNotificationCenter.current().delegate = self
-                      UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
-                      application.registerForRemoteNotifications()
-
-                      window = UIWindow(frame: UIScreen.main.bounds)
-                      window?.rootViewController = ViewController()
-                      window?.makeKeyAndVisible()
-                      return true
-                  }
-
-                  func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-                      completionHandler([.banner, .sound, .badge])
-                  }
-              }
-          ''').strip() + "\n")
-
-          pathlib.Path("ios_app/NexaChat/ViewController.swift").write_text(textwrap.dedent('''
+          # 3. Write unified Swift source file (main.swift)
+          pathlib.Path("ios_app/main.swift").write_text(textwrap.dedent(r'''
               import UIKit
               import WebKit
               import UserNotifications
@@ -886,12 +884,11 @@ jobs:
 
                   override func viewDidLoad() {
                       super.viewDidLoad()
-                      view.backgroundColor = UIColor(red: 11/255, green: 20/255, blue: 26/255, alpha: 1.0)
+                      view.backgroundColor = UIColor(red: 11.0/255.0, green: 20.0/255.0, blue: 26.0/255.0, alpha: 1.0)
 
                       let contentController = WKUserContentController()
                       contentController.add(self, name: "NexaNativeBridge")
 
-                      // Inject NexaNativeBridge & Android object so nexa-apk-gate.js and nexa-privacy.js recognize Official Native App
                       let bridgeJs = """
                       window.NexaNativeBridge = {
                           getFcmToken: function() { return localStorage.getItem('nexa_ios_push_token') || 'ios_native_client'; },
@@ -920,7 +917,6 @@ jobs:
                       config.mediaTypesRequiringUserActionForPlayback = []
                       config.allowsAirPlayForMediaPlayback = false
 
-                      // Clear only HTTP disk/memory cache on launch (preserves localStorage login data)
                       let cacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
                       WKWebsiteDataStore.default().removeData(ofTypes: cacheTypes, modifiedSince: Date(timeIntervalSince1970: 0)) {}
 
@@ -976,47 +972,57 @@ jobs:
                       decisionHandler(.grant)
                   }
               }
+
+              class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+                  var window: UIWindow?
+
+                  func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                      UNUserNotificationCenter.current().delegate = self
+                      UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+                      application.registerForRemoteNotifications()
+
+                      window = UIWindow(frame: UIScreen.main.bounds)
+                      window?.rootViewController = ViewController()
+                      window?.makeKeyAndVisible()
+                      return true
+                  }
+
+                  func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+                      completionHandler([.banner, .sound, .badge])
+                  }
+              }
+
+              UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AppDelegate.self))
           ''').strip() + "\n")
 
-          # 4. Create XcodeGen project.yml
-          pathlib.Path("ios_app/project.yml").write_text(textwrap.dedent('''
-              name: NexaChat
-              options:
-                bundleIdPrefix: com.imr
-                deploymentTarget:
-                  iOS: "15.0"
-              targets:
-                NexaChat:
-                  type: application
-                  platform: iOS
-                  sources:
-                    - NexaChat
-                  settings:
-                    base:
-                      PRODUCT_BUNDLE_IDENTIFIER: com.imr.nexachat
-                      INFOPLIST_FILE: NexaChat/Info.plist
-                      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-                      CODE_SIGN_IDENTITY: ""
-                      CODE_SIGNING_REQUIRED: NO
-                      CODE_SIGNING_ALLOWED: NO
-          ''').strip() + "\n")
-
-      - name: Build iOS App & Package into NEXA-CHAT.ipa
+      - name: Compile iOS Binary & Package into NEXA-CHAT.ipa
         run: |
-          cd ios_app
-          xcodegen generate
-          xcodebuild -project NexaChat.xcodeproj \
-            -scheme NexaChat \
-            -sdk iphoneos \
-            -configuration Release \
-            -derivedDataPath build \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos swiftc \
+            -target arm64-apple-ios15.0 \
+            -sdk "$SDK_PATH" \
+            -O \
+            ios_app/main.swift \
+            -framework UIKit \
+            -framework WebKit \
+            -framework UserNotifications \
+            -framework Foundation \
+            -framework CoreGraphics \
+            -o ios_app/Payload/NexaChat.app/NexaChat
 
-          mkdir -p Payload
-          cp -r build/Build/Products/Release-iphoneos/NexaChat.app Payload/
+          chmod +x ios_app/Payload/NexaChat.app/NexaChat
+
+          xcrun actool ios_app/Assets.xcassets \
+            --compile ios_app/Payload/NexaChat.app \
+            --platform iphoneos \
+            --minimum-deployment-target 15.0 \
+            --app-icon AppIcon \
+            --output-partial-info-plist ios_app/partial.plist || true
+
+          plutil -convert binary1 ios_app/Payload/NexaChat.app/Info.plist
+          codesign --force --deep --sign - ios_app/Payload/NexaChat.app
+
+          cd ios_app
           zip -r -q NexaChat-iOS.ipa Payload
 
       - name: Upload iOS IPA
