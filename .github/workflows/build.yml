@@ -1,4 +1,4 @@
-name: Build NEXA CHAT Signed APK & AAB
+name: Build NEXA CHAT Signed APK, AAB & iOS IPA
 
 on:
   push:
@@ -726,3 +726,301 @@ jobs:
         with:
           name: NEXA-CHAT-Signed-AAB
           path: app/build/outputs/bundle/release/*.aab
+
+  build_ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Pillow & XcodeGen for iOS IPA Build
+        run: |
+          python3 -m pip install --quiet pillow
+          brew install xcodegen || true
+
+      - name: Generate iOS Project, Custom Logo & Native Security Bridge
+        shell: python3 {0}
+        run: |
+          import os, glob, json, pathlib, textwrap
+          from PIL import Image
+
+          os.makedirs("ios_app/NexaChat/Assets.xcassets/AppIcon.appiconset", exist_ok=True)
+
+          # 1. Generate iOS App Icons from uploaded "Nexa Chat Neon Glass Logo.png"
+          logo_files = []
+          for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+              logo_files.extend(glob.glob(ext))
+
+          if logo_files:
+              src_logo = Image.open(logo_files[0]).convert("RGBA")
+          else:
+              src_logo = Image.new("RGBA", (1024, 1024), (8, 20, 34, 255))
+
+          w, h = src_logo.size
+          crop_box = (int(w * 0.08), int(h * 0.08), int(w * 0.92), int(h * 0.92))
+          core_logo = src_logo.crop(crop_box)
+
+          # iOS requires opaque RGB PNG (no alpha channel)
+          bg_rgb = Image.new("RGB", core_logo.size, (8, 20, 34))
+          bg_rgb.paste(core_logo, mask=core_logo.split()[3])
+
+          icon_specs = [
+              ("Icon-20@2x.png", 40),
+              ("Icon-20@3x.png", 60),
+              ("Icon-29@2x.png", 58),
+              ("Icon-29@3x.png", 87),
+              ("Icon-40@2x.png", 80),
+              ("Icon-40@3x.png", 120),
+              ("Icon-60@2x.png", 120),
+              ("Icon-60@3x.png", 180),
+              ("Icon-1024.png", 1024),
+          ]
+
+          for fname, px in icon_specs:
+              bg_rgb.resize((px, px), Image.Resampling.LANCZOS).save(
+                  f"ios_app/NexaChat/Assets.xcassets/AppIcon.appiconset/{fname}", "PNG"
+              )
+
+          contents_json = {
+              "images": [
+                  {"idiom": "iphone", "size": "20x20", "scale": "2x", "filename": "Icon-20@2x.png"},
+                  {"idiom": "iphone", "size": "20x20", "scale": "3x", "filename": "Icon-20@3x.png"},
+                  {"idiom": "iphone", "size": "29x29", "scale": "2x", "filename": "Icon-29@2x.png"},
+                  {"idiom": "iphone", "size": "29x29", "scale": "3x", "filename": "Icon-29@3x.png"},
+                  {"idiom": "iphone", "size": "40x40", "scale": "2x", "filename": "Icon-40@2x.png"},
+                  {"idiom": "iphone", "size": "40x40", "scale": "3x", "filename": "Icon-40@3x.png"},
+                  {"idiom": "iphone", "size": "60x60", "scale": "2x", "filename": "Icon-60@2x.png"},
+                  {"idiom": "iphone", "size": "60x60", "scale": "3x", "filename": "Icon-60@3x.png"},
+                  {"idiom": "ios-marketing", "size": "1024x1024", "scale": "1x", "filename": "Icon-1024.png"}
+              ],
+              "info": {"version": 1, "author": "xcode"}
+          }
+          pathlib.Path("ios_app/NexaChat/Assets.xcassets/AppIcon.appiconset/Contents.json").write_text(
+              json.dumps(contents_json, indent=2)
+          )
+
+          # 2. Create Info.plist
+          pathlib.Path("ios_app/NexaChat/Info.plist").write_text(textwrap.dedent('''
+              <?xml version="1.0" encoding="UTF-8"?>
+              <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+              <plist version="1.0">
+              <dict>
+                  <key>CFBundleDevelopmentRegion</key>
+                  <string>en</string>
+                  <key>CFBundleDisplayName</key>
+                  <string>NEXA CHAT</string>
+                  <key>CFBundleExecutable</key>
+                  <string>$(EXECUTABLE_NAME)</string>
+                  <key>CFBundleIdentifier</key>
+                  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+                  <key>CFBundleInfoDictionaryVersion</key>
+                  <string>6.0</string>
+                  <key>CFBundleName</key>
+                  <string>NexaChat</string>
+                  <key>CFBundlePackageType</key>
+                  <string>APPL</string>
+                  <key>CFBundleShortVersionString</key>
+                  <string>3.0</string>
+                  <key>CFBundleVersion</key>
+                  <string>3</string>
+                  <key>LSRequiresIPhoneOS</key>
+                  <true/>
+                  <key>UILaunchScreen</key>
+                  <dict/>
+                  <key>UIRequiredDeviceCapabilities</key>
+                  <array>
+                      <string>arm64</string>
+                  </array>
+                  <key>UISupportedInterfaceOrientations</key>
+                  <array>
+                      <string>UIInterfaceOrientationPortrait</string>
+                  </array>
+                  <key>NSCameraUsageDescription</key>
+                  <string>NEXA CHAT needs camera access to share photos and videos.</string>
+                  <key>NSMicrophoneUsageDescription</key>
+                  <string>NEXA CHAT needs microphone access for encrypted voice calls and voice notes.</string>
+                  <key>NSPhotoLibraryUsageDescription</key>
+                  <string>NEXA CHAT needs photo library access to share media.</string>
+                  <key>NSLocationWhenInUseUsageDescription</key>
+                  <string>NEXA CHAT needs location access to share current and live locations in chat.</string>
+              </dict>
+              </plist>
+          ''').strip() + "\n")
+
+          # 3. Create AppDelegate.swift & ViewController.swift (with Anti-AirPlay/ScreenCapture & Native Bridge)
+          pathlib.Path("ios_app/NexaChat/AppDelegate.swift").write_text(textwrap.dedent('''
+              import UIKit
+              import UserNotifications
+
+              @main
+              class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+                  var window: UIWindow?
+
+                  func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                      UNUserNotificationCenter.current().delegate = self
+                      UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+                      application.registerForRemoteNotifications()
+
+                      window = UIWindow(frame: UIScreen.main.bounds)
+                      window?.rootViewController = ViewController()
+                      window?.makeKeyAndVisible()
+                      return true
+                  }
+
+                  func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+                      completionHandler([.banner, .sound, .badge])
+                  }
+              }
+          ''').strip() + "\n")
+
+          pathlib.Path("ios_app/NexaChat/ViewController.swift").write_text(textwrap.dedent('''
+              import UIKit
+              import WebKit
+              import UserNotifications
+
+              class ViewController: UIViewController, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
+                  private var webView: WKWebView!
+                  private var privacyBlackoutView: UIView!
+                  private let appUrl = URL(string: "https://secure.imrteleservices.in")!
+
+                  override func viewDidLoad() {
+                      super.viewDidLoad()
+                      view.backgroundColor = UIColor(red: 11/255, green: 20/255, blue: 26/255, alpha: 1.0)
+
+                      let contentController = WKUserContentController()
+                      contentController.add(self, name: "NexaNativeBridge")
+
+                      // Inject NexaNativeBridge & Android object so nexa-apk-gate.js and nexa-privacy.js recognize Official Native App
+                      let bridgeJs = """
+                      window.NexaNativeBridge = {
+                          getFcmToken: function() { return localStorage.getItem('nexa_ios_push_token') || 'ios_native_client'; },
+                          isScreenCastingActive: function() { return window.__nexaIosCaptured === true; },
+                          setCastPrivacyEnabled: function(en) { window.webkit.messageHandlers.NexaNativeBridge.postMessage({action:'setCastPrivacy', enabled: !!en}); },
+                          clearWebCacheOnly: function() { window.webkit.messageHandlers.NexaNativeBridge.postMessage({action:'clearCache'}); },
+                          setMutedGroups: function(s) { localStorage.setItem('nexa_muted_groups', s || '{}'); },
+                          setArchivedChats: function(s) { localStorage.setItem('nexa_archived_chats', s || '[]'); },
+                          setShutterNotificationsEnabled: function(en) { localStorage.setItem('nexa_shutter_enabled', en ? '1' : '0'); },
+                          setActiveChatId: function(id) { localStorage.setItem('nexa_active_chat_id', id || ''); },
+                          showGroupNotification: function(groupId, title, body) {
+                              window.webkit.messageHandlers.NexaNativeBridge.postMessage({action:'notify', groupId: groupId || '', title: title || 'NEXA CHAT', body: body || 'New Encrypted Message'});
+                          },
+                          cancelGroupNotification: function(groupId) {},
+                          clearAllNotifications: function() {},
+                          requestNotificationPermission: function() {}
+                      };
+                      window.Android = window.NexaNativeBridge;
+                      """
+                      let script = WKUserScript(source: bridgeJs, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                      contentController.addUserScript(script)
+
+                      let config = WKWebViewConfiguration()
+                      config.userContentController = contentController
+                      config.allowsInlineMediaPlayback = true
+                      config.mediaTypesRequiringUserActionForPlayback = []
+                      config.allowsAirPlayForMediaPlayback = false
+
+                      // Clear only HTTP disk/memory cache on launch (preserves localStorage login data)
+                      let cacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
+                      WKWebsiteDataStore.default().removeData(ofTypes: cacheTypes, modifiedSince: Date(timeIntervalSince1970: 0)) {}
+
+                      webView = WKWebView(frame: view.bounds, configuration: config)
+                      webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                      webView.uiDelegate = self
+                      webView.navigationDelegate = self
+                      webView.scrollView.bounces = false
+                      view.addSubview(webView)
+
+                      setupPrivacyBlackoutShield()
+                      NotificationCenter.default.addObserver(self, selector: #selector(screenCaptureChanged), name: UIScreen.capturedDidChangeNotification, object: nil)
+
+                      webView.load(URLRequest(url: appUrl, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30))
+                  }
+
+                  private func setupPrivacyBlackoutShield() {
+                      privacyBlackoutView = UIView(frame: view.bounds)
+                      privacyBlackoutView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                      privacyBlackoutView.backgroundColor = .black
+                      privacyBlackoutView.isHidden = !UIScreen.main.isCaptured
+                      view.addSubview(privacyBlackoutView)
+                  }
+
+                  @objc private func screenCaptureChanged() {
+                      let captured = UIScreen.main.isCaptured || UIScreen.screens.count > 1
+                      privacyBlackoutView.isHidden = !captured
+                      webView.evaluateJavaScript("window.__nexaIosCaptured = \(captured); if(window.onNexaScreenCastStateChanged) window.onNexaScreenCastStateChanged(\(captured));", completionHandler: nil)
+                  }
+
+                  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+                      guard let dict = message.body as? [String: Any], let action = dict["action"] as? String else { return }
+                      if action == "notify" {
+                          let title = (dict["title"] as? String) ?? "NEXA CHAT"
+                          let body = (dict["body"] as? String) ?? "New Encrypted Message"
+                          let groupId = (dict["groupId"] as? String) ?? "default"
+
+                          let content = UNMutableNotificationContent()
+                          content.title = title
+                          content.body = body
+                          content.sound = .default
+
+                          let req = UNNotificationRequest(identifier: "nexa_grp_\(groupId)", content: content, trigger: nil)
+                          UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+                      } else if action == "clearCache" {
+                          let cacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
+                          WKWebsiteDataStore.default().removeData(ofTypes: cacheTypes, modifiedSince: Date(timeIntervalSince1970: 0)) {}
+                      }
+                  }
+
+                  @available(iOS 15.0, *)
+                  func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+                      decisionHandler(.grant)
+                  }
+              }
+          ''').strip() + "\n")
+
+          # 4. Create XcodeGen project.yml
+          pathlib.Path("ios_app/project.yml").write_text(textwrap.dedent('''
+              name: NexaChat
+              options:
+                bundleIdPrefix: com.imr
+                deploymentTarget:
+                  iOS: "15.0"
+              targets:
+                NexaChat:
+                  type: application
+                  platform: iOS
+                  sources:
+                    - NexaChat
+                  settings:
+                    base:
+                      PRODUCT_BUNDLE_IDENTIFIER: com.imr.nexachat
+                      INFOPLIST_FILE: NexaChat/Info.plist
+                      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                      CODE_SIGN_IDENTITY: ""
+                      CODE_SIGNING_REQUIRED: NO
+                      CODE_SIGNING_ALLOWED: NO
+          ''').strip() + "\n")
+
+      - name: Build iOS App & Package into NEXA-CHAT.ipa
+        run: |
+          cd ios_app
+          xcodegen generate
+          xcodebuild -project NexaChat.xcodeproj \
+            -scheme NexaChat \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/NexaChat.app Payload/
+          zip -r -q NexaChat-iOS.ipa Payload
+
+      - name: Upload iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEXA-CHAT-iOS-IPA
+          path: ios_app/NexaChat-iOS.ipa
