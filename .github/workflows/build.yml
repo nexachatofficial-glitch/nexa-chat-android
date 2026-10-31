@@ -22,12 +22,84 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Generate Android Project Files
+      - name: Install Pillow for Custom App Logo Generation
+        run: |
+          python3 -m pip install --quiet pillow
+
+      - name: Generate Android Project Files & Custom NEXA CHAT Logo
         shell: python3 {0}
         run: |
-          import os, pathlib, textwrap
+          import os, glob, pathlib, textwrap
+          from PIL import Image, ImageDraw
 
           os.makedirs("app/src/main/java/com/imr/nexachat", exist_ok=True)
+          os.makedirs("app/src/main/res/values", exist_ok=True)
+          os.makedirs("app/src/main/res/mipmap-anydpi-v26", exist_ok=True)
+
+          # 1. Find uploaded "Nexa Chat Neon Glass Logo.png" (or any image in repo root)
+          logo_files = []
+          for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+              logo_files.extend(glob.glob(ext))
+
+          if logo_files:
+              src_logo = Image.open(logo_files[0]).convert("RGBA")
+          else:
+              src_logo = Image.new("RGBA", (1024, 1024), (8, 20, 34, 255))
+
+          w, h = src_logo.size
+          # Trim outer empty margin (~8%) so the Neon Glass logo fills the Android icon completely
+          crop_box = (int(w * 0.08), int(h * 0.08), int(w * 0.92), int(h * 0.92))
+          core_logo = src_logo.crop(crop_box)
+
+          densities = {
+              "mipmap-mdpi": 48,
+              "mipmap-hdpi": 72,
+              "mipmap-xhdpi": 96,
+              "mipmap-xxhdpi": 144,
+              "mipmap-xxxhdpi": 192,
+          }
+
+          for folder, px in densities.items():
+              out_dir = f"app/src/main/res/{folder}"
+              os.makedirs(out_dir, exist_ok=True)
+
+              # Standard Launcher Icon
+              sq_img = core_logo.resize((px, px), Image.Resampling.LANCZOS)
+              sq_img.save(f"{out_dir}/ic_launcher.png", "PNG")
+
+              # Round Launcher Icon
+              mask = Image.new("L", (px, px), 0)
+              ImageDraw.Draw(mask).ellipse((0, 0, px, px), fill=255)
+              rnd_img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+              rnd_img.paste(sq_img, (0, 0), mask)
+              rnd_img.save(f"{out_dir}/ic_launcher_round.png", "PNG")
+
+              # Adaptive Foreground Icon (Android 8.0+)
+              fg_size = int(px * 2.25)
+              inner_size = int(fg_size * 0.70)
+              fg_canvas = Image.new("RGBA", (fg_size, fg_size), (8, 20, 34, 255))
+              fg_inner = core_logo.resize((inner_size, inner_size), Image.Resampling.LANCZOS)
+              offset = (fg_size - inner_size) // 2
+              fg_canvas.paste(fg_inner, (offset, offset), fg_inner)
+              fg_canvas.save(f"{out_dir}/ic_launcher_foreground.png", "PNG")
+
+          pathlib.Path("app/src/main/res/values/colors.xml").write_text(textwrap.dedent('''
+              <?xml version="1.0" encoding="utf-8"?>
+              <resources>
+                  <color name="ic_launcher_background">#081422</color>
+              </resources>
+          ''').strip() + "\n")
+
+          adaptive_xml = textwrap.dedent('''
+              <?xml version="1.0" encoding="utf-8"?>
+              <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+                  <background android:drawable="@color/ic_launcher_background"/>
+                  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+              </adaptive-icon>
+          ''').strip() + "\n"
+
+          pathlib.Path("app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml").write_text(adaptive_xml)
+          pathlib.Path("app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml").write_text(adaptive_xml)
 
           pathlib.Path("settings.gradle").write_text(textwrap.dedent(r'''
               pluginManagement {
@@ -75,8 +147,8 @@ jobs:
                       applicationId "com.imr.nexachat"
                       minSdk 24
                       targetSdk 34
-                      versionCode 2
-                      versionName "2.0"
+                      versionCode 3
+                      versionName "3.0"
                   }
 
                   signingConfigs {
@@ -162,7 +234,8 @@ jobs:
 
                   <application
                       android:allowBackup="false"
-                      android:icon="@android:drawable/sym_action_chat"
+                      android:icon="@mipmap/ic_launcher"
+                      android:roundIcon="@mipmap/ic_launcher_round"
                       android:label="NEXA CHAT"
                       android:usesCleartextTraffic="false"
                       android:hardwareAccelerated="true"
@@ -204,9 +277,13 @@ jobs:
               import android.content.Intent;
               import android.content.SharedPreferences;
               import android.content.pm.PackageManager;
+              import android.graphics.BitmapFactory;
+              import android.hardware.display.DisplayManager;
               import android.net.Uri;
               import android.os.Build;
               import android.os.Bundle;
+              import android.view.Display;
+              import android.view.WindowManager;
               import android.webkit.GeolocationPermissions;
               import android.webkit.JavascriptInterface;
               import android.webkit.PermissionRequest;
@@ -231,13 +308,43 @@ jobs:
                   private WebView webView;
                   private ValueCallback<Uri[]> fileUploadCallback;
                   private String pendingGroupIdFromNotif = null;
+                  private DisplayManager displayManager;
+
+                  private final DisplayManager.DisplayListener castDisplayListener = new DisplayManager.DisplayListener() {
+                      @Override
+                      public void onDisplayAdded(int displayId) {
+                          notifyWebCastState();
+                      }
+
+                      @Override
+                      public void onDisplayRemoved(int displayId) {
+                          notifyWebCastState();
+                      }
+
+                      @Override
+                      public void onDisplayChanged(int displayId) {
+                          notifyWebCastState();
+                      }
+                  };
 
                   @SuppressLint("SetJavaScriptEnabled")
                   @Override
                   protected void onCreate(Bundle savedInstanceState) {
                       super.onCreate(savedInstanceState);
+
+                      // OS-Level Blackout for TV, Laptop, Xbox Screen Casting & Screenshots
+                      getWindow().setFlags(
+                          WindowManager.LayoutParams.FLAG_SECURE,
+                          WindowManager.LayoutParams.FLAG_SECURE
+                      );
+
                       createShutterNotificationChannel();
                       requestEssentialRuntimePermissions();
+
+                      displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+                      if (displayManager != null) {
+                          displayManager.registerDisplayListener(castDisplayListener, null);
+                      }
 
                       webView = new WebView(this);
                       setContentView(webView);
@@ -246,9 +353,13 @@ jobs:
                       ws.setJavaScriptEnabled(true);
                       ws.setDomStorageEnabled(true);
                       ws.setDatabaseEnabled(true);
+                      ws.setCacheMode(WebSettings.LOAD_DEFAULT);
                       ws.setMediaPlaybackRequiresUserGesture(false);
                       ws.setAllowFileAccess(true);
                       ws.setAllowContentAccess(true);
+
+                      // Clear only file cache so new code updates load immediately without clearing localStorage
+                      webView.clearCache(true);
 
                       NexaBridge bridge = new NexaBridge(this);
                       webView.addJavascriptInterface(bridge, "NexaNativeBridge");
@@ -259,6 +370,7 @@ jobs:
                           public void onPageFinished(WebView view, String url) {
                               super.onPageFinished(view, url);
                               pushFcmTokenToWeb();
+                              notifyWebCastState();
                               if (pendingGroupIdFromNotif != null && !pendingGroupIdFromNotif.isEmpty()) {
                                   final String gId = pendingGroupIdFromNotif;
                                   pendingGroupIdFromNotif = null;
@@ -298,6 +410,31 @@ jobs:
                       handleNotificationIntent(getIntent());
                       webView.loadUrl(APP_URL);
                       fetchAndStoreFcmToken();
+                  }
+
+                  @Override
+                  protected void onDestroy() {
+                      if (displayManager != null) {
+                          displayManager.unregisterDisplayListener(castDisplayListener);
+                      }
+                      super.onDestroy();
+                  }
+
+                  private boolean checkExternalDisplayActive() {
+                      if (displayManager == null) return false;
+                      Display[] displays = displayManager.getDisplays();
+                      if (displays != null && displays.length > 1) return true;
+                      Display[] pres = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+                      return pres != null && pres.length > 0;
+                  }
+
+                  private void notifyWebCastState() {
+                      final boolean casting = checkExternalDisplayActive();
+                      if (webView != null) {
+                          runOnUiThread(() ->
+                              webView.evaluateJavascript("if(window.onNexaScreenCastStateChanged) window.onNexaScreenCastStateChanged(" + casting + ");", null)
+                          );
+                      }
                   }
 
                   @Override
@@ -431,7 +568,8 @@ jobs:
                           b.setPriority(Notification.PRIORITY_HIGH);
                       }
 
-                      b.setSmallIcon(android.R.drawable.sym_action_chat)
+                      b.setSmallIcon(R.mipmap.ic_launcher)
+                       .setLargeIcon(BitmapFactory.decodeResource(ctx.getResources(), R.mipmap.ic_launcher))
                        .setContentTitle(title != null ? title : "NEXA CHAT")
                        .setContentText(body != null ? body : "New Encrypted Message")
                        .setAutoCancel(true)
@@ -456,6 +594,30 @@ jobs:
                       @JavascriptInterface
                       public String getFcmToken() {
                           return ctx.getSharedPreferences("nexa_prefs", MODE_PRIVATE).getString("fcm_token", "");
+                      }
+
+                      @JavascriptInterface
+                      public boolean isScreenCastingActive() {
+                          return checkExternalDisplayActive();
+                      }
+
+                      @JavascriptInterface
+                      public void setCastPrivacyEnabled(final boolean enabled) {
+                          runOnUiThread(() -> {
+                              if (enabled) {
+                                  getWindow().setFlags(
+                                      WindowManager.LayoutParams.FLAG_SECURE,
+                                      WindowManager.LayoutParams.FLAG_SECURE
+                                  );
+                              }
+                          });
+                      }
+
+                      @JavascriptInterface
+                      public void clearWebCacheOnly() {
+                          runOnUiThread(() -> {
+                              if (webView != null) webView.clearCache(true);
+                          });
                       }
 
                       @JavascriptInterface
