@@ -303,7 +303,7 @@ jobs:
 
               public class MainActivity extends Activity {
                   public static final String CHANNEL_ID = "nexa_shutter_channel_v1";
-                  private static final String APP_URL = "https://secure.imrteleservices.in";
+                  private static final String APP_URL = "https://nexachats.in";
                   private static final int FILE_CHOOSER_REQ = 102;
                   private WebView webView;
                   private ValueCallback<Uri[]> fileUploadCallback;
@@ -880,7 +880,7 @@ jobs:
               class ViewController: UIViewController, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
                   private var webView: WKWebView!
                   private var privacyBlackoutView: UIView!
-                  private let appUrl = URL(string: "https://secure.imrteleservices.in")!
+                  private let appUrl = URL(string: "https://nexachats.in")!
 
                   override func viewDidLoad() {
                       super.viewDidLoad()
